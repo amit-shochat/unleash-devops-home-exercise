@@ -1,0 +1,85 @@
+name: Build and Deploy App
+
+on:
+  push:
+    branches:
+      - main
+env:
+  REPO_NAME: ${{ github.event.repository.name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+             
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.6.1
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3.3.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      #Run Trivy vulnerability source code scanner in repo mode
+      - name: Run Trivy vulnerability scanner in repo mode
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          exit-code: '0'
+          vuln-type: 'os,library'
+
+      - name: Build and push Docker image
+        run: | 
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ github.sha }} .
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ github.sha }}
+            
+      # Run Trivy vulnerability image scanner
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      # Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+  
+      - name: Update ECS Task Definition
+        id: task-def
+        run: |
+          ecs_task_definition=$(aws ecs describe-task-definition --task-definition ${{ secrets.ECS_TASK_DEFINITION }})
+          new_task_def=$(echo $ecs_task_definition | jq --arg IMAGE "${{ secrets.DOCKER_USERNAME }}/${{ env.REPO_NAME }}:${{ github.sha }}" '.taskDefinition | .containerDefinitions[0].image = $IMAGE | del(.status, .revision, .taskDefinitionArn, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+          new_task_def_num=$(echo $ecs_task_definition | jq -r '.taskDefinition.taskDefinitionArn' | awk -F'/' '{print $2}' | awk -F':' '{print $2}')
+          echo "new_task_def_num=$new_task_def_num" >> $GITHUB_ENV
+          echo "$new_task_def" > new-task-def.json
+          aws ecs register-task-definition --cli-input-json file://new-task-def.json
+        env:
+          task_definition_arn: ${{ steps.task-def.outputs.new_task_def_num }}
+
+      - name: Deploy ECS Service
+        run: |
+          echo ${{ secrets.ECS_CLUSTER }}
+          echo ${{ secrets.ECS_SERVICE }}
+          echo  ${{ secrets.AWS_REGION }}
+          echo ${{ secrets.ECS_TASK_DEFINITION }}        
+          aws ecs update-service --cluster ${{ secrets.ECS_CLUSTER }} \
+            --service ${{ secrets.ECS_SERVICE }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --task-definition ${{ secrets.ECS_TASK_DEFINITION }} \
+            --force-new-deployment
