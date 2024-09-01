@@ -39,7 +39,7 @@ egress_protocol          = "-1"
 # S3
 iam_user             = "ecs-s3-user"
 bucket_force_destroy = true
-bucket_name          = "express-bucket-3"
+bucket_name          = "express-bucket-amit"
 
 # ECS 
 app_image         = "amitshochat66/express-bucket-app:7ebffde9d469927727dc7c70b4e4f31f73f7fb28"
